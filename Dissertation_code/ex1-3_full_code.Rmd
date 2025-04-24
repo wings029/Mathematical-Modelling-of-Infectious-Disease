@@ -1,0 +1,1049 @@
+---
+title: "(Age-only model) Change Coverage"
+date: "2025-02-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+library(deSolve)
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library(scales)
+```
+
+```{r}
+SIRS_int <- function(t, y, parms) {
+  Sp <- y[1] #primary infection
+  Ip <- y[2] #primary infection
+  R <- y[3]
+  Ss <- y[4] #secondary infection
+  Is <- y[5] #secondary infection
+  Spv <- y[6] #primary infection
+  Ipv <- y[7] #primary infection
+  Rv <- y[8]
+  Ssv <- y[9] #secondary infection
+  Isv <- y[10] #secondary infection
+  
+  mu <- parms["mu"]
+  mu_v <- parms["mu_v"]
+  mu_c <- parms["mu_c"]
+  alpha <- parms["alpha"]
+  sigma <- parms["sigma"]
+  sigma_v <- parms["sigma_v"]
+  beta <- parms["beta"]
+  beta_v <- parms["beta_v"]
+  omega <- parms["omega"] 
+  omega_v <- parms["omega_v"]
+  theta <- parms["theta"] #level of immune protection against death
+  
+  # Intervention-related params
+  day_interv <- parms["day_interv"]
+  interv_duration <- parms["interv_duration"]
+  day_lift_interv <- day_interv + interv_duration 
+  cov_i <- parms["cov_i"]
+  efficacy <- parms["efficacy"]
+  
+  # Time-dependent intervention effect
+  int_cov <- (t >= day_interv & t < day_lift_interv) * cov_i
+  intervention <- (1 - efficacy * int_cov)
+  
+  # Define birth rate & total population size
+  N <- Sp + Ip + R + Ss + Is + Spv + Ipv + Rv + Ssv + Isv
+  b <- (mu * (Sp + Ip + R + Ss + Is) + mu_v * (Spv + Ipv + Rv + Ssv + Isv))/N
+  
+  # Intervention affects transmission
+  dSp <- b * N - intervention * beta * Sp * (Ip + Ipv + Is + Isv) / N - (mu + alpha) * Sp  
+  dIp <- intervention * beta * Sp * (Ip + Ipv + Is + Isv) / N - (mu + sigma) * Ip
+  dR <- sigma * (Ip + Is) - (mu + alpha + omega) * R
+  dSs <- omega * R - (mu + alpha) * Ss - intervention * beta * Ss * (Ip + Ipv + Is + Isv) / N
+  dIs <- intervention * beta * Ss * (Ip + Ipv + Is + Isv) / N- (mu + sigma) * Is
+  dSpv <- alpha * Sp - mu_v * Spv - intervention * beta_v * Spv * (Ip + Ipv + Is + Isv) / N
+  dIpv <- intervention * beta_v * Spv * (Ip + Ipv + Is + Isv) / N - (mu_c + mu_v + sigma_v) * Ipv
+  dRv <- sigma_v * (Ipv + Isv) + alpha * R - (mu_v + omega_v) * Rv
+  dSsv <- omega_v * Rv + alpha * Ss - mu_v * Ssv - intervention * beta_v * Ssv * (Ip + Ipv + Is + Isv) / N
+  dIsv <- intervention * beta_v * Ssv * (Ip + Ipv + Is + Isv) / N - ((1 - theta) * mu_c + mu_v + sigma_v) * Isv
+  
+  res <- c(dSp, dIp, dR, dSs, dIs, dSpv, dIpv, dRv, dSsv, dIsv)
+  list(res)
+}
+```
+
+
+################################################# SIR model ############################################
+```{r Population 1 params}
+# Population 1 (A) parameters 
+# This can be replaced with other population's parameters & starting conditions to simulate other population typologies
+parms1 <- c(alpha = 0.01134021 / 365, mu_c = 0.005 / 7.3,
+            mu = 0.004 / 365, mu_v = 0.5 / 365,
+            sigma = 50 / 365, sigma_v = 50 / 365, 
+            beta = 100 / 365, beta_v = 100 / 365, 
+            omega = 0, #make omega 0 to simulate SIR dynamics
+            omega_v = 0, 
+            theta = 1,  
+            day_interv = 30, 
+            interv_duration = 100,
+            cov_i = 0.8,   
+            efficacy = 1)  
+start1 <- c(Sp = 0.978 - 0.000001, Ip = 0.000001, R = 0, Ss = 0, Is = 0, Spv = 0.022, Ipv = 0, Rv = 0, Ssv = 0, Isv = 0)
+times <- seq(0, 365 * 3, by = 1) 
+```
+
+To simulate the other 5 population typologies, replace the following params/starting conditions and keep the rest the same.
+  * (A) represents age-only framework; (A+C) represents age + comorbidities framework
+- Population 2 (A)
+  alpha = 0.01189189 / 365, mu_v = 0.2 / 365
+  Sp = 0.761 - 0.000001, Spv = 0.239
+- Population 3 (A)
+  alpha = 0.01571429 / 365, mu_v = 0.05 / 365
+  Sp = 0.944 - 0.000001, Spv = 0.056
+- Population 1 (A+C)
+  alpha = 0.0185 / 365, mu_v = 0.037 / 365
+  Sp = 0.667 - 0.000001, Spv = 0.333
+- Population 2 (A+C)
+  alpha = 0.02475 / 365, mu_v = 0.027 / 365
+  Sp = 0.522 - 0.000001, Spv = 0.478
+- Population 3 (A+C)
+  alpha = 0.01419149 / 365, mu_v = 0.0667 / 365
+  Sp = 0.825 - 0.000001, Spv = 0.175
+
+## Percentage reduction in cumulative excess mortality (heatmap) & peak Iv
+Generate heatmaps to understand the impact of intervention start time, Coverage and duration.
+
+```{r Population 1 + 60-day duration}
+parms1["interv_duration"] = 60
+
+start_days1 <- seq(0, 150, by = 5)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+results60 <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times, func = SIRS_int, parms = parms1)
+  
+  excess_mortality1 <- out1[,"Ipv"] * parms1["mu_c"] + out1[, "Isv"] * (1 - parms1["theta"]) * parms1["mu_c"]
+  cum_exc_mor1 <- tail(cumsum(excess_mortality1), n = 1)
+  peak_Iv <- max(out1[,"Ipv"] + out1[, "Isv"]) 
+  results60 <- rbind(results60, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         cumulative_excess_mortality = cum_exc_mor1,
+                                         peak_Iv = peak_Iv))
+}
+
+# % Reduction in cumulative excess mortality
+results60$percentage_reduction <- (max(results60$cumulative_excess_mortality)-results60$cumulative_excess_mortality)/ max(results60$cumulative_excess_mortality)*100
+
+# % Reduction in peak Iv
+results60$percentage_reduction_peak_Iv <- (max(results60$peak_Iv) - results60$peak_Iv)/max(results60$peak_Iv)*100
+```
+
+```{r Population 1 + 100-day duration}
+parms1["interv_duration"] = 100
+
+start_days1 <- seq(0, 150, by = 5)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+results100 <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times, func = SIRS_int, parms = parms1)
+  
+  excess_mortality1 <- out1[,"Ipv"] * parms1["mu_c"] + out1[, "Isv"] * (1 - parms1["theta"]) * parms1["mu_c"]
+  cum_exc_mor1 <- tail(cumsum(excess_mortality1), n = 1)
+  peak_Iv <- max(out1[,"Ipv"] + out1[, "Isv"]) 
+  results100 <- rbind(results100, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         cumulative_excess_mortality = cum_exc_mor1,
+                                         peak_Iv = peak_Iv))
+}
+
+# % Reduction in cumulative excess mortality
+results100$percentage_reduction <- (max(results100$cumulative_excess_mortality)-results100$cumulative_excess_mortality)/ max(results100$cumulative_excess_mortality)*100
+
+# % Reduction in peak Iv
+results100$percentage_reduction_peak_Iv <- (max(results100$peak_Iv) - results100$peak_Iv)/max(results100$peak_Iv)*100
+```
+
+```{r Population 1 + 200-day duration}
+parms1["interv_duration"] = 200
+
+start_days1 <- seq(0, 150, by = 5)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+results200 <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times, func = SIRS_int, parms = parms1)
+  
+  excess_mortality1 <- out1[,"Ipv"] * parms1["mu_c"] + out1[, "Isv"] * (1 - parms1["theta"]) * parms1["mu_c"]
+  cum_exc_mor1 <- tail(cumsum(excess_mortality1), n = 1)
+  peak_Iv <- max(out1[,"Ipv"] + out1[, "Isv"]) 
+  results200 <- rbind(results200, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         cumulative_excess_mortality = cum_exc_mor1,
+                                         peak_Iv = peak_Iv))
+}
+
+# % Reduction in cumulative excess mortality
+results200$percentage_reduction <- (max(results200$cumulative_excess_mortality)-results200$cumulative_excess_mortality)/ max(results200$cumulative_excess_mortality)*100
+
+# % Reduction in peak Iv
+results200$percentage_reduction_peak_Iv <- (max(results200$peak_Iv) - results200$peak_Iv)/max(results200$peak_Iv)*100
+```
+
+```{r Population 1 + 300-day duration}
+parms1["interv_duration"] = 300
+
+start_days1 <- seq(0, 150, by = 5)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+results300 <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times, func = SIRS_int, parms = parms1, maxsteps=1e5, method="lsoda", rtol = 1e-4, atol = 1e-6)
+  
+  excess_mortality1 <- out1[,"Ipv"] * parms1["mu_c"] + out1[, "Isv"] * (1 - parms1["theta"]) * parms1["mu_c"]
+  cum_exc_mor1 <- tail(cumsum(excess_mortality1), n = 1)
+  peak_Iv <- max(out1[,"Ipv"] + out1[, "Isv"]) 
+  results300 <- rbind(results300, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         cumulative_excess_mortality = cum_exc_mor1,
+                                         peak_Iv = peak_Iv))
+}
+
+# % Reduction in cumulative excess mortality
+results300$percentage_reduction <- (max(results300$cumulative_excess_mortality)-results300$cumulative_excess_mortality)/ max(results300$cumulative_excess_mortality)*100
+
+# % Reduction in peak Iv
+results300$percentage_reduction_peak_Iv <- (max(results300$peak_Iv) - results300$peak_Iv)/max(results300$peak_Iv)*100
+```
+
+```{r pop1 heatmaps - cumulative disease deaths}
+# Colour scale
+scale_min <- 0
+scale_max <- max(results60$percentage_reduction, results100$percentage_reduction, results200$percentage_reduction,
+                 results300$percentage_reduction)
+
+# 60-day
+pop1_60d <- ggplot(results60, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "purple", 
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Cumulative Disease Deaths") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Effectiveness"
+  ) +
+  theme_bw()
+pop1_60d
+
+# 100-day
+pop1_100d <- ggplot(results100, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "purple", 
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Cumulative Disease Deaths") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Effectiveness"
+  ) +
+  theme_bw()
+pop1_100d
+
+# 200-day
+pop1_200d <- ggplot(results200, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "purple", 
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Cumulative Disease Deaths") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Effectiveness"
+  ) +
+  theme_bw()
+pop1_200d
+
+# 300-day
+pop1_300d <- ggplot(results300, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "purple", 
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Cumulative Disease Deaths") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Effectiveness"
+  ) +
+  theme_bw()
+pop1_300d
+```
+
+```{r pop1 heatmaps - peak Iv}
+# Colour scale
+scale_min <- 0
+scale_max <- max(results60$percentage_reduction_peak_Iv, results100$percentage_reduction_peak_Iv, 
+                 results200$percentage_reduction_peak_Iv, results300$percentage_reduction_peak_Iv)
+
+# 60-day duration
+pop1_60d_peak <- ggplot(results60, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction_peak_Iv)) +
+  geom_tile() +
+  scale_fill_gradient(low = "orange", high = "blue",
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Peak Iv") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Effectiveness"
+  ) +
+  theme_bw()
+pop1_60d_peak
+
+# 100-day duration
+pop1_100d_peak <- ggplot(results100, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction_peak_Iv)) +
+  geom_tile() +
+  scale_fill_gradient(low = "orange", high = "blue",
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Peak Iv") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Effectiveness"
+  ) +
+  theme_bw()
+pop1_100d_peak
+
+# 200-day duration
+pop1_200d_peak <- ggplot(results200, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction_peak_Iv)) +
+  geom_tile() +
+  scale_fill_gradient(low = "orange", high = "blue",
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Peak Iv") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Effectiveness"
+  ) +
+  theme_bw()
+pop1_200d_peak
+
+# 300-day duration
+pop1_300d_peak <- ggplot(results300, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction_peak_Iv)) +
+  geom_tile() +
+  scale_fill_gradient(low = "orange", high = "blue",
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Peak Iv") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Effectiveness"
+  ) +
+  theme_bw()
+pop1_300d_peak
+```
+
+
+################################################# SIRS model ############################################
+
+```{r Simulation time}
+times_SIRS <- seq(0, 1500, by = 1) 
+```
+
+For exercise 3, change theta in parms1 below to test different assumptions on the level of immune protection against death. 
+
+```{r Population 1 params}
+### Population 1 params
+# Again, the parameters & starting conditions can be replaced to simulate other population typologies. 
+parms1 <- c(alpha = 0.01134021 / 365, mu_c = 0.005 / 7.3,
+            mu = 0.004 / 365, mu_v = 0.5 / 365,
+            sigma = 50 / 365, sigma_v = 50 / 365, 
+            beta = 100 / 365, beta_v = 100 / 365, 
+            omega = 1 / 600, #immunity lasts 600 days
+            omega_v = 1 / 600, 
+            theta = 0, #level of immune protection against death   
+            day_interv = 0, 
+            interv_duration = 0,
+            cov_i = 0,   
+            efficacy = 1)  
+start1 <- c(Sp = 0.978 - 0.000001, Ip = 0.000001, R = 0, Ss = 0, Is = 0, Spv = 0.022, Ipv = 0, Rv = 0, Ssv = 0, Isv = 0)
+```
+
+## Peak excess mortality (heatmap) - 1st epidemic wave
+
+The results are the same as those obtained from the SIR model. The height of the first peak in SIRS model is the same as that of the peak in SIR model.
+
+Since the results are exactly the same, we will move on to plot the second peak in SIRS model.
+
+## Peak Iv & Peak deaths (heatmap) - 2nd epidemic wave
+
+Extreme interventions e.g. 100% coverage starting at 40 days and lasts 200 days would delay the first endemic peak to over 500 days. Thus, to capture the second peak, we need to filter data to reserve only data at time>700 days. 
+
+```{r Population 1 + 60-day duration}
+parms1["interv_duration"] = 60
+
+start_days1 <- seq(0, 800, by = 40) #Look at a wider range of start days to capture trends for the 2nd epidemic wave
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+results60d_SIRS <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times_SIRS, func = SIRS_int, parms = parms1)
+  out1_df <- as.data.frame(out1)
+  out1_df$Iv <- out1_df$Ipv + out1_df$Isv
+  
+  # Find the second epidemic peak 
+  j=0
+  for (x in 1:nrow(out1_df)){ 
+    diff1 = out1_df$Iv[x+1] - out1_df$Iv[x]
+    diff2 = out1_df$Iv[x+2] - out1_df$Iv[x+1]
+    if (x != 1501){
+      if ((diff1>0) & (diff2<0) & (out1_df$Iv[x+1] > 3e-4)){ #assume the second peak is larger than the 3rd peak in intervention-free scenario
+      j=j+1
+      }
+    } else {  #if there is no large second peak identified, loop through the data again and record the second peak regardless of its size
+      l=0
+      for (k in 1:nrow(out1_df)){
+        diff3 = out1_df$Iv[k+1] - out1_df$Iv[k]
+        diff4 = out1_df$Iv[k+2] - out1_df$Iv[k+1]
+        if ((diff3>0) & (diff4<0)){
+          l = l + 1
+        }
+        if (l == 2){
+          second_peak_time = k+1
+          break
+        }
+      }
+    }
+    if (j == 2){
+      second_peak_time = x+1
+      break
+    }
+  }
+  peak_prevalence = out1_df[second_peak_time, "Iv"]
+  peak_deaths_theta0 <- out1_df[second_peak_time, "Ipv"] * parms1["mu_c"] + out1_df[second_peak_time, "Isv"] * parms1["mu_c"]
+  peak_deaths_theta1 <- out1_df[second_peak_time, "Ipv"] * parms1["mu_c"]
+  results60d_SIRS <- rbind(results60d_SIRS, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         peak_Iv = peak_prevalence,
+                                         peak_deaths_theta0 = peak_deaths_theta0,
+                                         peak_deaths_theta1 = peak_deaths_theta1))
+}
+
+# Peak Iv
+results60d_SIRS$percentage_reduction_peak_Iv <- (results60d_SIRS[1, "peak_Iv"] - results60d_SIRS$peak_Iv)/results60d_SIRS[1, "peak_Iv"]*100 # % reduction
+results60d_SIRS$percentage_change_Iv <- -results60d_SIRS$percentage_reduction_peak_Iv # % change
+
+# Peak Deaths (for the condition: theta = 0)
+results60d_SIRS$percentage_reduction_peak_deaths_theta0 <- (results60d_SIRS[1, "peak_deaths_theta0"] - results60d_SIRS$peak_deaths_theta0)/results60d_SIRS[1, "peak_deaths_theta0"]*100 # % reduction
+results60d_SIRS$percentage_change_deaths_theta0 <- -results60d_SIRS$percentage_reduction_peak_deaths_theta0 # % change
+
+# Peak Deaths (for the condition: theta = 1)
+results60d_SIRS$percentage_reduction_peak_deaths_theta1 <- (results60d_SIRS[1, "peak_deaths_theta1"] - results60d_SIRS$peak_deaths_theta1)/results60d_SIRS[1, "peak_deaths_theta1"]*100 # % reduction
+results60d_SIRS$percentage_change_deaths_theta1 <- -results60d_SIRS$percentage_reduction_peak_deaths_theta1 # % change
+```
+
+```{r Population 1 + 100-day duration}
+parms1["interv_duration"] = 100
+
+start_days1 <- seq(0, 800, by = 40)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+results100d_SIRS <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times_SIRS, func = SIRS_int, parms = parms1)
+  out1_df <- as.data.frame(out1)
+  out1_df$Iv <- out1_df$Ipv + out1_df$Isv
+  
+  # Find the second epidemic peak 
+  j=0
+  for (x in 1:nrow(out1_df)){ 
+    diff1 = out1_df$Iv[x+1] - out1_df$Iv[x]
+    diff2 = out1_df$Iv[x+2] - out1_df$Iv[x+1]
+    if (x != 1501){
+      if ((diff1>0) & (diff2<0) & (out1_df$Iv[x+1] > 3e-4)){ #assume the second peak is larger than the 3rd peak in intervention-free scenario
+      j=j+1
+      }
+    } else {  #if there is no large second peak identified, loop through the data again and record the second peak regardless of its size
+      l=0
+      for (k in 1:nrow(out1_df)){
+        diff3 = out1_df$Iv[k+1] - out1_df$Iv[k]
+        diff4 = out1_df$Iv[k+2] - out1_df$Iv[k+1]
+        if ((diff3>0) & (diff4<0)){
+          l = l + 1
+        }
+        if (l == 2){
+          second_peak_time = k+1
+          break
+        }
+      }
+    }
+    if (j == 2){
+      second_peak_time = x+1
+      break
+    }
+  }
+  peak_prevalence = out1_df[second_peak_time, "Iv"]
+  peak_deaths_theta0 <- out1_df[second_peak_time, "Ipv"] * parms1["mu_c"] + out1_df[second_peak_time, "Isv"] * parms1["mu_c"]
+  peak_deaths_theta1 <- out1_df[second_peak_time, "Ipv"] * parms1["mu_c"]
+  results100d_SIRS <- rbind(results100d_SIRS, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         peak_Iv = peak_prevalence,
+                                         peak_deaths_theta0 = peak_deaths_theta0,
+                                         peak_deaths_theta1 = peak_deaths_theta1))
+}
+
+# Peak Iv
+results100d_SIRS$percentage_reduction_peak_Iv <- (results100d_SIRS[1, "peak_Iv"] - results100d_SIRS$peak_Iv)/results100d_SIRS[1, "peak_Iv"]*100 # % reduction
+results100d_SIRS$percentage_change_Iv <- -results100d_SIRS$percentage_reduction_peak_Iv # % change
+
+# Peak Deaths (theta = 0)
+results100d_SIRS$percentage_reduction_peak_deaths_theta0 <- (results100d_SIRS[1, "peak_deaths_theta0"] - results100d_SIRS$peak_deaths_theta0)/results100d_SIRS[1, "peak_deaths_theta0"]*100 # % reduction
+results100d_SIRS$percentage_change_deaths_theta0 <- -results100d_SIRS$percentage_reduction_peak_deaths_theta0 # % change
+
+# Peak Deaths (theta = 1)
+results100d_SIRS$percentage_reduction_peak_deaths_theta1 <- (results100d_SIRS[1, "peak_deaths_theta1"] - results100d_SIRS$peak_deaths_theta1)/results100d_SIRS[1, "peak_deaths_theta1"]*100 # % reduction
+results100d_SIRS$percentage_change_deaths_theta1 <- -results100d_SIRS$percentage_reduction_peak_deaths_theta1 # % change
+
+# Which intervention gives us the maximum peak Iv
+index_max <- which.max(results100d_SIRS$peak_Iv)
+max_day_interv <- results100d_SIRS[index_max, 1]
+max_coverage <- results100d_SIRS[index_max, 2] 
+cat("Maximum peak", "\n", 
+    "intervention start day:", max_day_interv, "\n",
+    "intervention coverage:", max_coverage, "\n")
+
+# Which intervention gives us the minimum peak Iv
+index_min <- which.min(results100d_SIRS$peak_Iv)
+min_day_interv <- results100d_SIRS[index_min, 1]
+min_coverage <- results100d_SIRS[index_min, 2] 
+cat("Minimum peak", "\n", 
+    "intervention start day:", min_day_interv, "\n",
+    "intervention coverage:", min_coverage, "\n")
+```
+
+
+```{r Population 1 + 200-day duration}
+parms1["interv_duration"] = 200
+
+start_days1 <- seq(0, 800, by = 40)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+results200d_SIRS <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times_SIRS, func = SIRS_int, parms = parms1, maxsteps=1e5, method="lsoda", rtol = 1e-4, atol = 1e-6)
+  out1_df <- as.data.frame(out1)
+  out1_df$Iv <- out1_df$Ipv + out1_df$Isv
+  
+  # Find the second epidemic peak 
+  j=0
+  for (x in 1:nrow(out1_df)){ 
+    diff1 = out1_df$Iv[x+1] - out1_df$Iv[x]
+    diff2 = out1_df$Iv[x+2] - out1_df$Iv[x+1]
+    if (x != 1501){
+      if ((diff1>0) & (diff2<0) & (out1_df$Iv[x+1] > 3e-4)){ #assume the second peak is larger than the 3rd peak in intervention-free scenario
+      j=j+1
+      }
+    } else {  #if there is no large second peak identified, loop through the data again and record the second peak regardless of its size
+      l=0
+      for (k in 1:nrow(out1_df)){
+        diff3 = out1_df$Iv[k+1] - out1_df$Iv[k]
+        diff4 = out1_df$Iv[k+2] - out1_df$Iv[k+1]
+        if ((diff3>0) & (diff4<0)){
+          l = l + 1
+        }
+        if (l == 2){
+          second_peak_time = k+1
+          break
+        }
+      }
+    }
+    if (j == 2){
+      second_peak_time = x+1
+      break
+    }
+  }
+  peak_prevalence = out1_df[second_peak_time, "Iv"]
+  peak_deaths_theta0 <- out1_df[second_peak_time, "Ipv"] * parms1["mu_c"] + out1_df[second_peak_time, "Isv"] * parms1["mu_c"]
+  peak_deaths_theta1 <- out1_df[second_peak_time, "Ipv"] * parms1["mu_c"]
+  results200d_SIRS <- rbind(results200d_SIRS, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         peak_Iv = peak_prevalence,
+                                         peak_deaths_theta0 = peak_deaths_theta0,
+                                         peak_deaths_theta1 = peak_deaths_theta1))
+}
+
+# Peak Iv
+results200d_SIRS$percentage_reduction_peak_Iv <- (results200d_SIRS[1, "peak_Iv"] - results200d_SIRS$peak_Iv)/results200d_SIRS[1, "peak_Iv"]*100 # % reduction
+results200d_SIRS$percentage_change_Iv <- -results200d_SIRS$percentage_reduction_peak_Iv # % change
+
+# Peak Deaths (theta = 0)
+results200d_SIRS$percentage_reduction_peak_deaths_theta0 <- (results200d_SIRS[1, "peak_deaths_theta0"] - results200d_SIRS$peak_deaths_theta0)/results200d_SIRS[1, "peak_deaths_theta0"]*100 # % reduction
+results200d_SIRS$percentage_change_deaths_theta0 <- -results200d_SIRS$percentage_reduction_peak_deaths_theta0 # % change
+
+# Peak Deaths (theta = 1)
+results200d_SIRS$percentage_reduction_peak_deaths_theta1 <- (results200d_SIRS[1, "peak_deaths_theta1"] - results200d_SIRS$peak_deaths_theta1)/results200d_SIRS[1, "peak_deaths_theta1"]*100 # % reduction
+results200d_SIRS$percentage_change_deaths_theta1 <- -results200d_SIRS$percentage_reduction_peak_deaths_theta1 # % change
+
+# Which intervention gives us the maximum peak Iv
+index_max <- which.max(results200d_SIRS$peak_Iv)
+max_day_interv <- results200d_SIRS[index_max, 1]
+max_coverage <- results200d_SIRS[index_max, 2] 
+cat("Maximum peak", "\n", 
+    "intervention start day:", max_day_interv, "\n",
+    "intervention coverage:", max_coverage, "\n")
+
+# Which intervention gives us the minimum peak Iv
+index_min <- which.min(results200d_SIRS$peak_Iv)
+min_day_interv <- results200d_SIRS[index_min, 1]
+min_coverage <- results200d_SIRS[index_min, 2] 
+cat("Minimum peak", "\n", 
+    "intervention start day:", min_day_interv, "\n",
+    "intervention coverage:", min_coverage, "\n")
+```
+
+For the last plot, we can't use 300-day duration because extreme interventions (e.g. cov = 1, start = 40) would postpone the first peak to around day 750, where the second peak of the no-intervention scenario would occur. Under this circumstance, we can't set the range of time to time>750 because that would pass the second peak of some scenarios while retaining second peak of the other. 
+```{r Population 1 + 250-day duration}
+parms1["interv_duration"] = 250
+
+start_days1 <- seq(0, 800, by = 40)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+results250d_SIRS <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times_SIRS, func = SIRS_int, parms = parms1, maxsteps=1e5, method="lsoda", rtol = 1e-4, atol = 1e-6)
+  out1_df <- as.data.frame(out1)
+  out1_df$Iv <- out1_df$Ipv + out1_df$Isv
+  
+  # Find the second epidemic peak 
+  j=0
+  for (x in 1:nrow(out1_df)){ 
+    diff1 = out1_df$Iv[x+1] - out1_df$Iv[x]
+    diff2 = out1_df$Iv[x+2] - out1_df$Iv[x+1]
+    if (x != 1501){
+      if ((diff1>0) & (diff2<0) & (out1_df$Iv[x+1] > 3e-4)){ #assume the second peak is larger than the 3rd peak in intervention-free scenario
+      j=j+1
+      }
+    } else {  #if there is no large second peak identified, loop through the data again and record the second peak regardless of its size
+      l=0
+      for (k in 1:nrow(out1_df)){
+        diff3 = out1_df$Iv[k+1] - out1_df$Iv[k]
+        diff4 = out1_df$Iv[k+2] - out1_df$Iv[k+1]
+        if ((diff3>0) & (diff4<0)){
+          l = l + 1
+        }
+        if (l == 2){
+          second_peak_time = k+1
+          break
+        }
+      }
+    }
+    if (j == 2){
+      second_peak_time = x+1
+      break
+    }
+  }
+  peak_prevalence = out1_df[second_peak_time, "Iv"]
+  peak_deaths_theta0 <- out1_df[second_peak_time, "Ipv"] * parms1["mu_c"] + out1_df[second_peak_time, "Isv"] * parms1["mu_c"]
+  peak_deaths_theta1 <- out1_df[second_peak_time, "Ipv"] * parms1["mu_c"]
+  results250d_SIRS <- rbind(results250d_SIRS, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         peak_Iv = peak_prevalence,
+                                         peak_deaths_theta0 = peak_deaths_theta0,
+                                         peak_deaths_theta1 = peak_deaths_theta1))
+}
+
+# Peak Iv
+results250d_SIRS$percentage_reduction_peak_Iv <- (results250d_SIRS[1, "peak_Iv"] - results250d_SIRS$peak_Iv)/results250d_SIRS[1, "peak_Iv"]*100 # % reduction
+
+results250d_SIRS$percentage_change_Iv <- -results250d_SIRS$percentage_reduction_peak_Iv # % change
+```
+
+```{r peak Iv heatmaps}
+# Colour scale
+scale_min <- min(results60d_SIRS$percentage_change_Iv, 
+                 results100d_SIRS$percentage_change_Iv, 
+                 results200d_SIRS$percentage_change_Iv,
+                 results250d_SIRS$percentage_change_Iv)
+scale_max <- max(results60d_SIRS$percentage_change_Iv, 
+                 results100d_SIRS$percentage_change_Iv, 
+                 results200d_SIRS$percentage_change_Iv,
+                 results250d_SIRS$percentage_change_Iv)
+
+# 60-day duration
+pop1_60d_peak2_SIRS <- ggplot(results60d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_Iv)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Iv",
+                       breaks = c(240, 160, 80, 0, -60)) +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) +  #remove x-axis padding
+  scale_y_continuous(expand = c(0, 0)) +  #remove y-axis padding
+  theme_bw()
+pop1_60d_peak2_SIRS
+
+# 100-day duration
+pop1_100d_peak2_SIRS <- ggplot(results100d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_Iv)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Iv",
+                       breaks = c(240, 160, 80, 0, -60)) +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) +  
+  scale_y_continuous(expand = c(0, 0)) +  
+  theme_bw()
+pop1_100d_peak2_SIRS
+
+# 200-day duration
+pop1_200d_peak2_SIRS <- ggplot(results200d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_Iv)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Iv",
+                       breaks = c(240, 160, 80, 0, -60)) +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) + 
+  scale_y_continuous(expand = c(0, 0)) +  
+  theme_bw()
+pop1_200d_peak2_SIRS
+
+# 250-day duration
+pop1_250d_peak2_SIRS <- ggplot(results250d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_Iv)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Iv",
+                       breaks = c(240, 160, 80, 0, -60)) +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) + 
+  scale_y_continuous(expand = c(0, 0)) +  
+  theme_bw()
+pop1_250d_peak2_SIRS
+```
+
+```{r peak deaths heatmaps - theta equals 0}
+# Colour scale
+scale_min <- min(results60d_SIRS$percentage_change_deaths_theta0, 
+                 results100d_SIRS$percentage_change_deaths_theta0, 
+                 results200d_SIRS$percentage_change_deaths_theta0)
+scale_max <- max(results60d_SIRS$percentage_change_deaths_theta0, 
+                 results100d_SIRS$percentage_change_deaths_theta0, 
+                 results200d_SIRS$percentage_change_deaths_theta0)
+
+# 60-day duration
+pop1_60d_theta0_deaths <- ggplot(results60d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_deaths_theta0)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Deaths",
+                       breaks = c(240, 160, 80, 0, -80)) +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) +  #remove x-axis padding
+  scale_y_continuous(expand = c(0, 0)) +  #remove y-axis padding
+  theme_bw()
+pop1_60d_theta0_deaths
+
+# 100-day duration
+pop1_100d_theta0_deaths <- ggplot(results100d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_deaths_theta0)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Deaths",
+                       breaks = c(240, 160, 80, 0, -80)) +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) +  
+  scale_y_continuous(expand = c(0, 0)) +  
+  theme_bw()
+pop1_100d_theta0_deaths
+
+# 200-day duration
+pop1_200d_theta0_deaths <- ggplot(results200d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_deaths_theta0)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Deaths",
+                       breaks = c(240, 160, 80, 0, -80)) +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) + 
+  scale_y_continuous(expand = c(0, 0)) +  
+  theme_bw()
+pop1_200d_theta0_deaths
+```
+
+```{r peak deaths heatmaps - theta equals 1}
+# Colour scale
+scale_min <- min(results60d_SIRS$percentage_change_deaths_theta1, 
+                 results100d_SIRS$percentage_change_deaths_theta1, 
+                 results200d_SIRS$percentage_change_deaths_theta1)
+scale_max <- max(results60d_SIRS$percentage_change_deaths_theta1, 
+                 results100d_SIRS$percentage_change_deaths_theta1, 
+                 results200d_SIRS$percentage_change_deaths_theta1)
+
+# 60-day duration
+pop1_60d_theta1_deaths <- ggplot(results60d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_deaths_theta1)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Deaths") +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) +  #remove x-axis padding
+  scale_y_continuous(expand = c(0, 0)) +  #remove y-axis padding
+  theme_bw()
+pop1_60d_theta1_deaths
+
+# 100-day duration
+pop1_100d_theta1_deaths <- ggplot(results100d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_deaths_theta1)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Deaths") +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) +  
+  scale_y_continuous(expand = c(0, 0)) +  
+  theme_bw()
+pop1_100d_theta1_deaths
+
+# 200-day duration
+pop1_200d_theta1_deaths <- ggplot(results200d_SIRS, aes(x = day_interv, y = reduction_risk, fill = percentage_change_deaths_theta1)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c("blue", "white", "red"),
+                       values = scales::rescale(c(scale_min, 0, scale_max)),
+                       limits = c(scale_min, scale_max),
+                       name = "% Change in Peak Deaths") +
+  labs(x = "Intervention Start Day", y = "Effectiveness") +
+  geom_vline(xintercept = 100, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 742, linetype = "dashed", color = "black", size = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) + 
+  scale_y_continuous(expand = c(0, 0)) +  
+  theme_bw()
+pop1_200d_theta1_deaths
+```
+
+### Cumulative excess mortality
+```{r Population 1 + 60-day duration}
+parms1["interv_duration"] = 60
+
+start_days1 <- seq(0, 800, by = 40)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+mortality_results60 <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times_SIRS, func = SIRS_int, parms = parms1)
+  
+  excess_mortality1 <- out1[,"Ipv"] * parms1["mu_c"] + out1[, "Isv"] * (1 - parms1["theta"]) * parms1["mu_c"]
+  cum_exc_mor1 <- tail(cumsum(excess_mortality1), n = 1)
+  mortality_results60 <- rbind(mortality_results60, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         cumulative_excess_mortality = cum_exc_mor1))
+}
+
+# % Reduction in cumulative excess mortality
+mortality_results60$percentage_reduction <- (mortality_results60[1, "cumulative_excess_mortality"]- mortality_results60$cumulative_excess_mortality)/mortality_results60[1, "cumulative_excess_mortality"]*100
+```
+
+```{r Population 1 + 100-day duration}
+parms1["interv_duration"] = 100
+
+start_days1 <- seq(0, 800, by = 40)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+mortality_results100 <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times_SIRS, func = SIRS_int, parms = parms1)
+  
+  excess_mortality1 <- out1[,"Ipv"] * parms1["mu_c"] + out1[, "Isv"] * (1 - parms1["theta"]) * parms1["mu_c"]
+  cum_exc_mor1 <- tail(cumsum(excess_mortality1), n = 1)
+  mortality_results100 <- rbind(mortality_results100, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         cumulative_excess_mortality = cum_exc_mor1))
+}
+
+# % Reduction in cumulative excess mortality
+mortality_results100$percentage_reduction <- (mortality_results100[1, "cumulative_excess_mortality"]- mortality_results100$cumulative_excess_mortality)/mortality_results100[1, "cumulative_excess_mortality"]*100
+```
+
+```{r Population 1 + 200-day duration}
+parms1["interv_duration"] = 200
+
+start_days1 <- seq(0, 800, by = 40)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+mortality_results200 <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times_SIRS, func = SIRS_int, parms = parms1)
+  
+  excess_mortality1 <- out1[,"Ipv"] * parms1["mu_c"] + out1[, "Isv"] * (1 - parms1["theta"]) * parms1["mu_c"]
+  cum_exc_mor1 <- tail(cumsum(excess_mortality1), n = 1)
+  mortality_results200 <- rbind(mortality_results200, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         cumulative_excess_mortality = cum_exc_mor1))
+}
+
+# % Reduction in cumulative excess mortality
+mortality_results200$percentage_reduction <- (mortality_results200[1, "cumulative_excess_mortality"]- mortality_results200$cumulative_excess_mortality)/mortality_results200[1, "cumulative_excess_mortality"]*100
+```
+
+```{r Population 1 + 300-day duration}
+parms1["interv_duration"] = 300
+
+start_days1 <- seq(0, 800, by = 40)
+reduction_infection_risk1 <- seq(0, 1, by = 0.05)
+combinations1 <- expand.grid(day_interv = start_days1, reduction_risk = reduction_infection_risk1)
+mortality_results300 <- data.frame(day_interv = numeric(), reduction_risk = numeric(), cum_excess_mortality = numeric())
+
+# Iterate over different combinations
+for (i in seq_len(nrow(combinations1))) {
+  parms1["day_interv"] <- combinations1$day_interv[i]
+  parms1["cov_i"] <- combinations1$reduction_risk[i]
+
+  out1 <- ode(y = start1, times = times_SIRS, func = SIRS_int, parms = parms1, maxsteps=1e5, method="lsoda", rtol = 1e-4, atol = 1e-6)
+  
+  excess_mortality1 <- out1[,"Ipv"] * parms1["mu_c"] + out1[, "Isv"] * (1 - parms1["theta"]) * parms1["mu_c"]
+  cum_exc_mor1 <- tail(cumsum(excess_mortality1), n = 1)
+  mortality_results300 <- rbind(mortality_results300, data.frame(day_interv = parms1["day_interv"], 
+                                         reduction_risk = parms1["cov_i"], 
+                                         cumulative_excess_mortality = cum_exc_mor1))
+}
+
+# % Reduction in cumulative excess mortality
+mortality_results300$percentage_reduction <- (mortality_results300[1, "cumulative_excess_mortality"]- mortality_results300$cumulative_excess_mortality)/mortality_results300[1, "cumulative_excess_mortality"]*100
+```
+
+```{r pop1 heatmaps}
+# Colour scale
+scale_min <- min(mortality_results60$percentage_reduction, 
+                 mortality_results100$percentage_reduction, 
+                 mortality_results200$percentage_reduction,
+                 mortality_results300$percentage_reduction)
+scale_max <- max(mortality_results60$percentage_reduction, 
+                 mortality_results100$percentage_reduction, 
+                 mortality_results200$percentage_reduction,
+                 mortality_results300$percentage_reduction)
+
+# 60-day
+pop1_60d_mortality <- ggplot(mortality_results60, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "purple", 
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Cumulative Disease Deaths") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Coverage"
+  ) +
+  theme_bw()
+pop1_60d_mortality
+
+# 100-day
+pop1_100d_mortality <- ggplot(mortality_results100, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "purple", 
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Cumulative Disease Deaths") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Coverage"
+  ) +
+  theme_bw()
+pop1_100d_mortality
+
+# 200-day
+pop1_200d_mortality <- ggplot(mortality_results200, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "purple", 
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Cumulative Disease Deaths") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Coverage"
+  ) +
+  theme_bw()
+pop1_200d_mortality
+
+# 300-day
+pop1_300d_mortality <- ggplot(mortality_results300, aes(x = day_interv, y = reduction_risk, fill = percentage_reduction)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "purple", 
+                      limits = c(scale_min, scale_max),
+                      name = "% Reduction in Cumulative Disease Deaths") +
+  labs(
+    x = "Intervention Start Day",
+    y = "Coverage"
+  ) +
+  theme_bw()
+pop1_300d_mortality
+```
+

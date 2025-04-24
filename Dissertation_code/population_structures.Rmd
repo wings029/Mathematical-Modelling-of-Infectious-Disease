@@ -1,0 +1,60 @@
+---
+title: 'Disease-free model for calculating population structures'
+date: "2024-12-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+options(device = function() {quartz(width = 8, height = 6)}) #set the plot window size to default
+```
+
+```{r}
+# load packages
+require(deSolve)  
+library(rootSolve)
+library(svglite)
+```
+
+Set up initial conditions and define a function for calculating alpha
+```{r}
+# Define a function to calculate alpha (rate of transition to vulnerable state) given other parameters
+calculate_alpha <- function(mu, muv, b) {
+  alpha <- muv*(mu-b)/(b-muv)
+  return(alpha)
+}
+
+# Please input population-specific mu & mu_v to calculate alpha
+mu <- 0.004
+muv <- 0.0667
+b <- 0.015 #b is consistent across population typologies
+alpha <- calculate_alpha(mu, muv, b)
+print(alpha)
+```
+
+
+Find the long-term equilibrium for S and Sv in a disease-free model
+```{r}
+#initial conditions and parameters
+condi = c(S = 1/7*6, Sv= 1/7) #starting conditions - this applies to all population typologies
+params = c(b = 0.015, mu = 0.004, muv = 0.037, alpha = 0.0185, N = 1)
+
+# the model
+population_model <- function(t, x, p) { 
+  with(as.list(c(p)), {
+    S<- x[1]
+    Sv<- x[2]
+    dS <- b * N - mu * S - alpha * S
+    dSv <- alpha * S - muv * Sv 
+    list(c(dS, dSv))
+  })
+}
+
+# Use the runsteady function to simulate hte population for a long time and find the equilibrium solution
+equil <- runsteady(y = condi, times = c(0, 1E7), func = population_model, parms = params)
+
+# Round the equilibrium values of S and Sv to 3 decimal places
+round(equil$y, 3) 
+```
+
