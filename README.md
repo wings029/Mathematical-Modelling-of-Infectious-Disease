@@ -23,7 +23,7 @@ The "Dissertation_code" folder contains the following R (or R markdown) scripts 
 
 "ex4_comparison_across_6_populations": This generates peak Iv and cumulative disease deaths heat maps for all 6 population typologies, under assumptions of exercise 4.
 
-The "Exploratory_code" folder contains R code written at early stages of the project to explore different intervention scenarios (most of which are permanent interventions) and model assumptions. These results were not included in the dissertation. 
+Exploratory R codes written at early stages of the project are not included in this repository because most of them involve incorrect parameter values, unrealistic model settings (e.g. permanent interventions) or uninteresting results. 
 
 
 
